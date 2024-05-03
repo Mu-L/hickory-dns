@@ -8,10 +8,15 @@
 use std::fmt::{Debug, Formatter};
 use std::{
     fmt,
+    future::Future,
+    io,
+    pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
-use quinn::AsyncUdpSocket;
+use quinn::{AsyncUdpSocket, UdpPoller};
+use tokio::io::Interest;
 
 use crate::udp::{DnsUdpSocket, QuicLocalAddr};
 
@@ -27,51 +32,20 @@ impl<S: DnsUdpSocket + QuicLocalAddr> Debug for QuinnAsyncUdpSocketAdapter<S> {
 }
 
 /// TODO: Naive implementation. Look forward to future improvements.
-impl<S: DnsUdpSocket + QuicLocalAddr + 'static> AsyncUdpSocket for QuinnAsyncUdpSocketAdapter<S> {
-    fn poll_send(
-        &self,
-        _state: &quinn::udp::UdpState,
-        cx: &mut Context<'_>,
-        transmits: &[quinn::udp::Transmit],
-    ) -> Poll<std::io::Result<usize>> {
-        // logics from quinn-udp::fallback.rs
-        let io = &self.io;
-        let mut sent = 0;
-        for transmit in transmits {
-            match io.poll_send_to(cx, &transmit.contents, transmit.destination) {
-                Poll::Ready(ready) => match ready {
-                    Ok(_) => {
-                        sent += 1;
-                    }
-                    // We need to report that some packets were sent in this case, so we rely on
-                    // errors being either harmlessly transient (in the case of WouldBlock) or
-                    // recurring on the next call.
-                    Err(_) if sent != 0 => return Poll::Ready(Ok(sent)),
-                    Err(e) => {
-                        if e.kind() == std::io::ErrorKind::WouldBlock {
-                            return Poll::Ready(Err(e));
-                        }
+impl<S: DnsUdpSocket + QuicLocalAddr + Clone + Sync + 'static> AsyncUdpSocket
+    for QuinnAsyncUdpSocketAdapter<S>
+{
+    fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
+        Box::pin(UdpPollHelper::new(move || {
+            let socket = self.io.clone();
+            async move { socket.writable().await }
+        }))
+    }
 
-                        // Other errors are ignored, since they will ususally be handled
-                        // by higher level retransmits and timeouts.
-                        // - PermissionDenied errors have been observed due to iptable rules.
-                        //   Those are not fatal errors, since the
-                        //   configuration can be dynamically changed.
-                        // - Destination unreachable errors have been observed for other
-                        // log_sendmsg_error(&mut self.last_send_error, e, transmit);
-                        sent += 1;
-                    }
-                },
-                Poll::Pending => {
-                    return if sent == 0 {
-                        Poll::Pending
-                    } else {
-                        Poll::Ready(Ok(sent))
-                    }
-                }
-            }
-        }
-        Poll::Ready(Ok(sent))
+    fn try_send(&self, transmit: &quinn::udp::Transmit<'_>) -> io::Result<()> {
+        self.io.try_io(Interest::WRITABLE, || {
+            self.inner.send((&self.io).into(), transmit)
+        })
     }
 
     fn poll_recv(
@@ -109,5 +83,57 @@ impl<S: DnsUdpSocket + QuicLocalAddr + 'static> AsyncUdpSocket for QuinnAsyncUdp
 
     fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
         self.io.local_addr()
+    }
+}
+
+pin_project_lite::pin_project! {
+    /// Helper adapting a function `MakeFut` that constructs a single-use future `Fut` into a
+    /// [`UdpPoller`] that may be reused indefinitely
+    struct UdpPollHelper<MakeFut, Fut> {
+        make_fut: MakeFut,
+        #[pin]
+        fut: Option<Fut>,
+    }
+}
+
+impl<MakeFut, Fut> UdpPollHelper<MakeFut, Fut> {
+    /// Construct a [`UdpPoller`] that calls `make_fut` to get the future to poll, storing it until
+    /// it yields [`Poll::Ready`], then creating a new one on the next
+    /// [`poll_writable`](UdpPoller::poll_writable)
+    fn new(make_fut: MakeFut) -> Self {
+        Self {
+            make_fut,
+            fut: None,
+        }
+    }
+}
+
+impl<MakeFut, Fut> UdpPoller for UdpPollHelper<MakeFut, Fut>
+where
+    MakeFut: Fn() -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = io::Result<()>> + Send + Sync + 'static,
+{
+    fn poll_writable(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let mut this = self.project();
+        if this.fut.is_none() {
+            this.fut.set(Some((this.make_fut)()));
+        }
+        // We're forced to `unwrap` here because `Fut` may be `!Unpin`, which means we can't safely
+        // obtain an `&mut Fut` after storing it in `self.fut` when `self` is already behind `Pin`,
+        // and if we didn't store it then we wouldn't be able to keep it alive between
+        // `poll_writable` calls.
+        let result = this.fut.as_mut().as_pin_mut().unwrap().poll(cx);
+        if result.is_ready() {
+            // Polling an arbitrary `Future` after it becomes ready is a logic error, so arrange for
+            // a new `Future` to be created on the next call.
+            this.fut.set(None);
+        }
+        result
+    }
+}
+
+impl<MakeFut, Fut> Debug for UdpPollHelper<MakeFut, Fut> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UdpPollHelper").finish_non_exhaustive()
     }
 }

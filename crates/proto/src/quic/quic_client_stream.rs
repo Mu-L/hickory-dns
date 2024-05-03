@@ -15,7 +15,9 @@ use std::{
 };
 
 use futures_util::{future::FutureExt, stream::Stream};
-use quinn::{ClientConfig, Connection, Endpoint, TransportConfig, VarInt};
+use quinn::{
+    crypto::rustls::QuicClientConfig, ClientConfig, Connection, Endpoint, TransportConfig, VarInt,
+};
 use rustls::{version::TLS13, ClientConfig as TlsClientConfig};
 
 use crate::udp::{DnsUdpSocket, QuicLocalAddr};
@@ -185,7 +187,7 @@ impl QuicClientStreamBuilder {
         dns_name: String,
     ) -> QuicClientConnect
     where
-        S: DnsUdpSocket + QuicLocalAddr + 'static,
+        S: DnsUdpSocket + QuicLocalAddr + Clone + 'static,
         F: Future<Output = std::io::Result<S>> + Send + 'static,
     {
         QuicClientConnect(Box::pin(self.connect_with_future(future, name_server, dns_name)) as _)
@@ -198,7 +200,7 @@ impl QuicClientStreamBuilder {
         dns_name: String,
     ) -> Result<QuicClientStream, ProtoError>
     where
-        S: DnsUdpSocket + QuicLocalAddr + 'static,
+        S: DnsUdpSocket + QuicLocalAddr + Clone + 'static,
         F: Future<Output = std::io::Result<S>> + Send,
     {
         let socket = future.await?;
@@ -207,7 +209,7 @@ impl QuicClientStreamBuilder {
         let endpoint = Endpoint::new_with_abstract_socket(
             endpoint_config,
             None,
-            wrapper,
+            Arc::new(wrapper),
             Arc::new(quinn::TokioRuntime),
         )?;
         self.connect_inner(endpoint, name_server, dns_name).await
@@ -248,7 +250,8 @@ impl QuicClientStreamBuilder {
         }
         let early_data_enabled = crypto_config.enable_early_data;
 
-        let mut client_config = ClientConfig::new(Arc::new(crypto_config));
+        let mut client_config =
+            ClientConfig::new(Arc::new(QuicClientConfig::try_from(crypto_config)?));
         client_config.transport_config(self.transport_config.clone());
 
         endpoint.set_default_client_config(client_config);
@@ -301,21 +304,15 @@ pub fn client_config_tls13() -> Result<TlsClientConfig, ProtoError> {
         }
     }
     #[cfg(feature = "webpki-roots")]
-    root_store.add_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| {
-        rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
-            ta.subject,
-            ta.spki,
-            ta.name_constraints,
-        )
-    }));
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
-    Ok(TlsClientConfig::builder()
-        .with_safe_default_cipher_suites()
-        .with_safe_default_kx_groups()
-        .with_protocol_versions(&[&TLS13])
-        .expect("TLS 1.3 not supported")
-        .with_root_certificates(root_store)
-        .with_no_client_auth())
+    Ok(
+        TlsClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_protocol_versions(&[&TLS13])
+            .expect("TLS 1.3 not supported")
+            .with_root_certificates(root_store)
+            .with_no_client_auth(),
+    )
 }
 
 impl Default for QuicClientStreamBuilder {

@@ -19,6 +19,7 @@ use futures_util::stream::Stream;
 use h3::client::SendRequest;
 use h3_quinn::OpenStreams;
 use http::header::{self, CONTENT_LENGTH};
+use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{ClientConfig, Endpoint, EndpointConfig, TransportConfig};
 use rustls::ClientConfig as TlsClientConfig;
 use tokio::sync::mpsc;
@@ -320,7 +321,7 @@ impl H3ClientStreamBuilder {
         dns_name: String,
     ) -> H3ClientConnect
     where
-        S: DnsUdpSocket + QuicLocalAddr + 'static,
+        S: DnsUdpSocket + QuicLocalAddr + Clone + 'static,
         F: Future<Output = std::io::Result<S>> + Send + Unpin + 'static,
     {
         H3ClientConnect(Box::pin(self.connect_with_future(future, name_server, dns_name)) as _)
@@ -330,10 +331,10 @@ impl H3ClientStreamBuilder {
         self,
         future: F,
         name_server: SocketAddr,
-        dns_name: String,
+        server_name: String,
     ) -> Result<H3ClientStream, ProtoError>
     where
-        S: DnsUdpSocket + QuicLocalAddr + 'static,
+        S: DnsUdpSocket + QuicLocalAddr + Clone + 'static,
         F: Future<Output = std::io::Result<S>> + Send,
     {
         let socket = future.await?;
@@ -341,10 +342,10 @@ impl H3ClientStreamBuilder {
         let endpoint = Endpoint::new_with_abstract_socket(
             EndpointConfig::default(),
             None,
-            wrapper,
+            Arc::new(wrapper),
             Arc::new(quinn::TokioRuntime),
         )?;
-        self.connect_inner(endpoint, name_server, dns_name).await
+        self.connect_inner(endpoint, name_server, server_name).await
     }
 
     async fn connect(
@@ -382,7 +383,8 @@ impl H3ClientStreamBuilder {
         }
         let early_data_enabled = crypto_config.enable_early_data;
 
-        let mut client_config = ClientConfig::new(Arc::new(crypto_config));
+        let mut client_config =
+            ClientConfig::new(Arc::new(QuicClientConfig::try_from(crypto_config)?));
         client_config.transport_config(self.transport_config.clone());
 
         endpoint.set_default_client_config(client_config);

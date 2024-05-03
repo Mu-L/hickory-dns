@@ -67,6 +67,8 @@ where
     async fn send_to(&self, buf: &[u8], target: SocketAddr) -> io::Result<usize> {
         futures_util::future::poll_fn(|cx| self.poll_send_to(cx, buf, target)).await
     }
+
+    async fn writable(&self) -> io::Result<()>;
 }
 
 /// Trait for UdpSocket
@@ -394,6 +396,10 @@ impl DnsUdpSocket for tokio::net::UdpSocket {
         target: SocketAddr,
     ) -> Poll<io::Result<usize>> {
         Self::poll_send_to(self, cx, buf, target)
+    }
+
+    async fn writable(&self) -> io::Result<()> {
+        self.writable().await
     }
 }
 

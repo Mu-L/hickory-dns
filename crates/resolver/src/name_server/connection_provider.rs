@@ -31,8 +31,6 @@ use tokio_openssl::SslStream as TokioTlsStream;
 use tokio_rustls::client::TlsStream as TokioTlsStream;
 
 use crate::config::{NameServerConfig, Protocol, ResolverOpts};
-#[cfg(any(feature = "dns-over-quic", feature = "dns-over-h3"))]
-use hickory_proto::udp::QuicLocalAddr;
 #[cfg(feature = "dns-over-https")]
 use proto::h2::{HttpsClientConnect, HttpsClientStream};
 #[cfg(feature = "dns-over-h3")]
@@ -72,8 +70,8 @@ pub trait RuntimeProvider: Clone + Send + Sync + Unpin + 'static {
     /// UdpSocket
     type Udp: DnsUdpSocket + Send;
     #[cfg(any(feature = "dns-over-quic", feature = "dns-over-h3"))]
-    /// UdpSocket, where `QuicLocalAddr` is for `quinn` crate.
-    type Udp: DnsUdpSocket + QuicLocalAddr + Send;
+    /// UdpSocket + AsyncUdpSocket
+    type Udp: DnsUdpSocket + quinn::AsyncUdpSocket + Send;
 
     /// TcpStream
     type Tcp: DnsTcpStream;

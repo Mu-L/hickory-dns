@@ -28,8 +28,6 @@ use tracing::{debug, warn};
 use crate::error::ProtoError;
 use crate::http::Version;
 use crate::op::Message;
-use crate::quic::quic_socket::QuinnAsyncUdpSocketAdapter;
-use crate::quic::QuicLocalAddr;
 use crate::udp::{DnsUdpSocket, UdpSocket};
 use crate::xfer::{DnsRequest, DnsRequestSender, DnsResponse, DnsResponseStream};
 
@@ -321,7 +319,7 @@ impl H3ClientStreamBuilder {
         dns_name: String,
     ) -> H3ClientConnect
     where
-        S: DnsUdpSocket + QuicLocalAddr + Clone + 'static,
+        S: DnsUdpSocket + quinn::AsyncUdpSocket + 'static,
         F: Future<Output = std::io::Result<S>> + Send + Unpin + 'static,
     {
         H3ClientConnect(Box::pin(self.connect_with_future(future, name_server, dns_name)) as _)
@@ -334,15 +332,14 @@ impl H3ClientStreamBuilder {
         server_name: String,
     ) -> Result<H3ClientStream, ProtoError>
     where
-        S: DnsUdpSocket + QuicLocalAddr + Clone + 'static,
+        S: DnsUdpSocket + quinn::AsyncUdpSocket + 'static,
         F: Future<Output = std::io::Result<S>> + Send,
     {
         let socket = future.await?;
-        let wrapper = QuinnAsyncUdpSocketAdapter { io: socket };
         let endpoint = Endpoint::new_with_abstract_socket(
             EndpointConfig::default(),
             None,
-            Arc::new(wrapper),
+            Arc::new(socket),
             Arc::new(quinn::TokioRuntime),
         )?;
         self.connect_inner(endpoint, name_server, server_name).await

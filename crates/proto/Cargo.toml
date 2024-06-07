@@ -127,7 +127,7 @@ socket2 = { workspace = true, optional = true }
 thiserror.workspace = true
 tinyvec = { workspace = true, features = ["alloc"] }
 tracing.workspace = true
-tokio = { workspace = true, features = ["io-util"], optional = true }
+tokio = { workspace = true, features = ["io-util", "macros"], optional = true }
 tokio-native-tls = { workspace = true, optional = true }
 tokio-openssl = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true, features = ["early-data"] }

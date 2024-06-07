@@ -67,8 +67,6 @@ where
     async fn send_to(&self, buf: &[u8], target: SocketAddr) -> io::Result<usize> {
         futures_util::future::poll_fn(|cx| self.poll_send_to(cx, buf, target)).await
     }
-
-    async fn writable(&self) -> io::Result<()>;
 }
 
 /// Trait for UdpSocket
@@ -89,24 +87,6 @@ pub trait UdpSocket: DnsUdpSocket {
 pub struct UdpStream<S: Send> {
     socket: S,
     outbound_messages: StreamReceiver,
-}
-
-/// To implement quinn::AsyncUdpSocket, we need our custom socket capable of getting local address.
-pub trait QuicLocalAddr {
-    /// Get local address
-    fn local_addr(&self) -> std::io::Result<std::net::SocketAddr>;
-}
-
-#[cfg(feature = "tokio-runtime")]
-use tokio::net::UdpSocket as TokioUdpSocket;
-
-#[cfg(feature = "tokio-runtime")]
-#[cfg_attr(docsrs, doc(cfg(feature = "tokio-runtime")))]
-#[allow(unreachable_pub)]
-impl QuicLocalAddr for TokioUdpSocket {
-    fn local_addr(&self) -> std::io::Result<SocketAddr> {
-        self.local_addr()
-    }
 }
 
 impl<S: UdpSocket + Send + 'static> UdpStream<S> {
@@ -396,10 +376,6 @@ impl DnsUdpSocket for tokio::net::UdpSocket {
         target: SocketAddr,
     ) -> Poll<io::Result<usize>> {
         Self::poll_send_to(self, cx, buf, target)
-    }
-
-    async fn writable(&self) -> io::Result<()> {
-        self.writable().await
     }
 }
 

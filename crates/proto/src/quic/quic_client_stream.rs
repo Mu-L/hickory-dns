@@ -20,10 +20,9 @@ use quinn::{
 };
 use rustls::{version::TLS13, ClientConfig as TlsClientConfig};
 
-use crate::udp::{DnsUdpSocket, QuicLocalAddr};
+use crate::udp::DnsUdpSocket;
 use crate::{
     error::ProtoError,
-    quic::quic_socket::QuinnAsyncUdpSocketAdapter,
     quic::quic_stream::{DoqErrorCode, QuicStream},
     udp::UdpSocket,
     xfer::{DnsRequest, DnsRequestSender, DnsResponse, DnsResponseStream},
@@ -187,7 +186,7 @@ impl QuicClientStreamBuilder {
         dns_name: String,
     ) -> QuicClientConnect
     where
-        S: DnsUdpSocket + QuicLocalAddr + Clone + 'static,
+        S: DnsUdpSocket + quinn::AsyncUdpSocket + 'static,
         F: Future<Output = std::io::Result<S>> + Send + 'static,
     {
         QuicClientConnect(Box::pin(self.connect_with_future(future, name_server, dns_name)) as _)
@@ -200,16 +199,15 @@ impl QuicClientStreamBuilder {
         dns_name: String,
     ) -> Result<QuicClientStream, ProtoError>
     where
-        S: DnsUdpSocket + QuicLocalAddr + Clone + 'static,
+        S: DnsUdpSocket + quinn::AsyncUdpSocket + 'static,
         F: Future<Output = std::io::Result<S>> + Send,
     {
         let socket = future.await?;
         let endpoint_config = quic_config::endpoint();
-        let wrapper = QuinnAsyncUdpSocketAdapter { io: socket };
         let endpoint = Endpoint::new_with_abstract_socket(
             endpoint_config,
             None,
-            Arc::new(wrapper),
+            Arc::new(socket),
             Arc::new(quinn::TokioRuntime),
         )?;
         self.connect_inner(endpoint, name_server, dns_name).await

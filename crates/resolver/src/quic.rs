@@ -5,7 +5,6 @@
 // https://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
-use hickory_proto::udp::QuicLocalAddr;
 use rustls::ClientConfig as CryptoConfig;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -55,7 +54,7 @@ pub(crate) fn new_quic_stream_with_future<S, F>(
     client_config: Option<TlsClientConfig>,
 ) -> DnsExchangeConnect<QuicClientConnect, QuicClientStream, TokioTime>
 where
-    S: DnsUdpSocket + QuicLocalAddr + 'static,
+    S: DnsUdpSocket + quinn::AsyncUdpSocket + 'static,
     F: Future<Output = std::io::Result<S>> + Send + 'static,
 {
     let client_config = if let Some(TlsClientConfig(client_config)) = client_config {

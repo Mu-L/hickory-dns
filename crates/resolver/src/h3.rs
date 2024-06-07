@@ -15,7 +15,7 @@ use proto::h3::{H3ClientConnect, H3ClientStream};
 use proto::xfer::{DnsExchange, DnsExchangeConnect};
 use proto::TokioTime;
 
-use hickory_proto::udp::{DnsUdpSocket, QuicLocalAddr};
+use hickory_proto::udp::DnsUdpSocket;
 use rustls::ClientConfig as CryptoConfig;
 
 #[allow(clippy::type_complexity)]
@@ -55,7 +55,7 @@ pub(crate) fn new_h3_stream_with_future<S, F>(
     client_config: Option<TlsClientConfig>,
 ) -> DnsExchangeConnect<H3ClientConnect, H3ClientStream, TokioTime>
 where
-    S: DnsUdpSocket + QuicLocalAddr + 'static,
+    S: DnsUdpSocket + quinn::AsyncUdpSocket + 'static,
     F: Future<Output = std::io::Result<S>> + Send + Unpin + 'static,
 {
     let client_config = if let Some(TlsClientConfig(client_config)) = client_config {

@@ -79,9 +79,7 @@ impl RecursiveAuthority {
             .record_cache_size(config.record_cache_size);
         #[cfg(feature = "dnssec")]
         recursor.security_aware(config.security_aware);
-        let recursor = recursor
-            .build(roots)
-            .map_err(|e| format!("failed to initialize recursor: {e}"))?;
+        let recursor = recursor.build(roots);
 
         Ok(Self {
             origin: origin.into(),

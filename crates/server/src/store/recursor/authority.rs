@@ -172,4 +172,12 @@ impl LookupObject for RecursiveLookup {
     fn take_additionals(&mut self) -> Option<Box<dyn LookupObject>> {
         None
     }
+
+    fn dnssec_validated(&self) -> bool {
+        // XXX what should be the behavior if the lookup yields no records?
+        self.0
+            .records()
+            .iter()
+            .all(|record| record.proof().is_secure())
+    }
 }

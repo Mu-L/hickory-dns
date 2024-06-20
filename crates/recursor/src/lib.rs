@@ -26,11 +26,14 @@
 #![recursion_limit = "2048"]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+mod common;
+mod dnssec_policy;
 pub mod error;
 mod recursor;
 mod recursor_dns_handle;
 pub(crate) mod recursor_pool;
 
+pub use dnssec_policy::DnssecPolicy;
 pub use error::{Error, ErrorKind};
 pub use hickory_proto as proto;
 pub use hickory_resolver as resolver;

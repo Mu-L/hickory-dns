@@ -1,12 +1,13 @@
-use std::{net::SocketAddr, time::Instant};
+use std::{net::SocketAddr, sync::Arc, time::Instant};
 
 use async_recursion::async_recursion;
 use futures_util::{future::select_all, FutureExt};
 use lru_cache::LruCache;
 use parking_lot::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::{
+    common,
     proto::{
         op::Query,
         rr::{RData, RecordType},
@@ -14,11 +15,9 @@ use crate::{
     recursor_pool::RecursorPool,
     resolver::{
         config::{NameServerConfig, NameServerConfigGroup, Protocol, ResolverOpts},
-        dns_lru::DnsLru,
-        dns_lru::TtlConfig,
+        dns_lru::{DnsLru, TtlConfig},
         lookup::Lookup,
-        name_server::TokioConnectionProvider,
-        name_server::{GenericNameServerPool, TokioRuntimeProvider},
+        name_server::{GenericNameServerPool, TokioConnectionProvider, TokioRuntimeProvider},
         Name,
     },
     Error, ErrorKind,
@@ -27,9 +26,10 @@ use crate::{
 /// Set of nameservers by the zone name
 type NameServerCache<P> = LruCache<Name, RecursorPool<P>>;
 
+#[derive(Clone)]
 pub(crate) struct RecursorDnsHandle {
     roots: RecursorPool<TokioRuntimeProvider>,
-    name_server_cache: Mutex<NameServerCache<TokioRuntimeProvider>>,
+    name_server_cache: Arc<Mutex<NameServerCache<TokioRuntimeProvider>>>,
     record_cache: DnsLru,
     security_aware: bool,
 }
@@ -51,7 +51,7 @@ impl RecursorDnsHandle {
         let roots =
             GenericNameServerPool::from_config(roots, opts, TokioConnectionProvider::default());
         let roots = RecursorPool::from(Name::root(), roots);
-        let name_server_cache = Mutex::new(NameServerCache::new(ns_cache_size));
+        let name_server_cache = Arc::new(Mutex::new(NameServerCache::new(ns_cache_size)));
         let record_cache = DnsLru::new(record_cache_size, TtlConfig::default());
 
         Self {
@@ -69,7 +69,7 @@ impl RecursorDnsHandle {
         query_has_dnssec_ok: bool,
     ) -> Result<Lookup, Error> {
         if let Some(lookup) = self.record_cache.get(&query, request_time) {
-            let lookup = maybe_strip_dnssec_records(query_has_dnssec_ok, lookup?, query);
+            let lookup = common::maybe_strip_dnssec_records(query_has_dnssec_ok, lookup?, query);
 
             return Ok(lookup);
         }
@@ -116,7 +116,7 @@ impl RecursorDnsHandle {
 
         // RFC 4035 section 3.2.1 if DO bit not set, strip DNSSEC records unless
         // explicitly requested
-        let lookup = maybe_strip_dnssec_records(query_has_dnssec_ok, response, query);
+        let lookup = common::maybe_strip_dnssec_records(query_has_dnssec_ok, response, query);
 
         Ok(lookup)
     }
@@ -138,31 +138,7 @@ impl RecursorDnsHandle {
         // TODO: should we change DnsHandle to always be a single response? And build a totally custom handler for other situations?
         // TODO: check if data is "authentic"
         match response.await {
-            Ok(r) => {
-                let mut r = r.into_message();
-                info!("response: {}", r.header());
-
-                let records = r
-                    .take_answers()
-                    .into_iter()
-                    .chain(r.take_name_servers())
-                    .chain(r.take_additionals())
-                    .filter(|x| {
-                        if !is_subzone(ns.zone().clone(), x.name().clone()) {
-                            warn!(
-                                "Dropping out of bailiwick record {x} for zone {}",
-                                ns.zone().clone()
-                            );
-                            false
-                        } else {
-                            true
-                        }
-                    });
-
-                let lookup = self.record_cache.insert_records(query, records, now);
-
-                lookup.ok_or_else(|| Error::from("no records found"))
-            }
+            Ok(r) => common::insert_response(r, Some(ns.zone()), &self.record_cache, query, now),
             Err(e) => {
                 warn!("lookup error: {e}");
                 Err(Error::from(e))
@@ -214,7 +190,7 @@ impl RecursorDnsHandle {
                 //     .filter_map(Record::data)
                 //     .filter_map(RData::to_ip_addr);
 
-                if !is_subzone(zone.base_name().clone(), zns.name().clone()) {
+                if !common::is_subzone(zone.base_name().clone(), zns.name().clone()) {
                     warn!(
                         "Dropping out of bailiwick record for {:?} with parent {:?}",
                         zns.name().clone(),
@@ -315,6 +291,11 @@ impl RecursorDnsHandle {
         self.name_server_cache.lock().insert(zone, ns.clone());
         Ok(ns)
     }
+
+    #[cfg(feature = "dnssec")]
+    pub(crate) fn record_cache(&self) -> &DnsLru {
+        &self.record_cache
+    }
 }
 
 fn recursor_opts() -> ResolverOpts {
@@ -327,109 +308,4 @@ fn recursor_opts() -> ResolverOpts {
     options.num_concurrent_reqs = 1;
 
     options
-}
-
-// as per section 3.2.1 of RFC4035
-fn maybe_strip_dnssec_records(query_has_dnssec_ok: bool, lookup: Lookup, query: Query) -> Lookup {
-    if query_has_dnssec_ok {
-        return lookup;
-    }
-
-    let records = lookup
-        .records()
-        .iter()
-        .filter(|rrset| {
-            let record_type = rrset.record_type();
-            record_type == query.query_type() || !record_type.is_dnssec()
-        })
-        .cloned()
-        .collect();
-
-    Lookup::new_with_deadline(query, records, lookup.valid_until())
-}
-
-/// Bailiwick/sub zone checking.
-///
-/// # Overview
-///
-/// This function checks that two host names have a parent/child relationship, but does so more strictly than elsewhere in the libraries
-/// (see implementation notes.)
-///
-/// A resolver should not return answers outside of its delegated authority -- if we receive a delegation from the root servers for
-/// "example.com", that server should only return answers related to example.com or a sub-domain thereof.  Note that record data may point
-/// to out-of-bailwick records (e.g., example.com could return a CNAME record for www.example.com that points to example.cdnprovider.net,)
-/// but it should not return a record name that is out-of-bailiwick (e.g., we ask for www.example.com and it returns www.otherdomain.com.)
-///
-/// Out-of-bailiwick responses have been used in cache poisoning attacks.
-///
-/// ## Examples
-///
-/// | Parent       | Child                | Expected Result                                                  |
-/// |--------------|----------------------|------------------------------------------------------------------|
-/// | .            | com.                 | In-bailiwick (true)                                              |
-/// | com.         | example.net.         | Out-of-bailiwick (false)                                         |
-/// | example.com. | www.example.com.     | In-bailiwick (true)                                              |
-/// | example.com. | www.otherdomain.com. | Out-of-bailiwick (false)                                         |
-/// | example.com  | www.example.com.     | Out-of-bailiwick (false, note the parent is not fully qualified) |
-///
-/// # Implementation Notes
-///
-/// * This function is nominally a wrapper around Name::zone_of, with two additional checks:
-/// * If the caller doesn't provide a parent at all, we'll return false.
-/// * If the domains have mixed qualification -- that is, if one is fully-qualified and the other partially-qualified, we'll return
-///    false.
-///
-/// # References
-///
-/// * [RFC 8499](https://datatracker.ietf.org/doc/html/rfc8499) -- DNS Terminology (see page 25)
-/// * [The Hitchiker's Guide to DNS Cache Poisoning](https://www.cs.utexas.edu/%7Eshmat/shmat_securecomm10.pdf) -- for a more in-depth
-/// discussion of DNS cache poisoning attacks, see section 4, specifically, for a discussion of the Bailiwick rule.
-fn is_subzone(parent: Name, child: Name) -> bool {
-    if parent.is_empty() {
-        return false;
-    }
-
-    if (parent.is_fqdn() && !child.is_fqdn()) || (!parent.is_fqdn() && child.is_fqdn()) {
-        return false;
-    }
-
-    parent.zone_of(&child)
-}
-
-#[test]
-fn is_subzone_test() {
-    use std::str::FromStr;
-
-    assert!(is_subzone(
-        Name::from_str(".").unwrap(),
-        Name::from_str("com.").unwrap()
-    ));
-    assert!(is_subzone(
-        Name::from_str("com.").unwrap(),
-        Name::from_str("example.com.").unwrap()
-    ));
-    assert!(is_subzone(
-        Name::from_str("example.com.").unwrap(),
-        Name::from_str("host.example.com.").unwrap()
-    ));
-    assert!(is_subzone(
-        Name::from_str("example.com.").unwrap(),
-        Name::from_str("host.multilevel.example.com.").unwrap()
-    ));
-    assert!(!is_subzone(
-        Name::from_str("").unwrap(),
-        Name::from_str("example.com.").unwrap()
-    ));
-    assert!(!is_subzone(
-        Name::from_str("com.").unwrap(),
-        Name::from_str("example.net.").unwrap()
-    ));
-    assert!(!is_subzone(
-        Name::from_str("example.com.").unwrap(),
-        Name::from_str("otherdomain.com.").unwrap()
-    ));
-    assert!(!is_subzone(
-        Name::from_str("com").unwrap(),
-        Name::from_str("example.com.").unwrap()
-    ));
 }

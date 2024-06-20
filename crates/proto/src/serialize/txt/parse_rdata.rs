@@ -88,6 +88,9 @@ impl RDataParser for RData {
             RecordType::TLSA => Self::TLSA(tlsa::parse(tokens)?),
             RecordType::TXT => Self::TXT(txt::parse(tokens)?),
             RecordType::SIG => return Err(ParseError::from("parsing SIG doesn't make sense")),
+            #[cfg(feature = "dnssec")]
+            RecordType::DNSKEY => Self::DNSSEC(DNSSECRData::DNSKEY(dnskey::parse(tokens)?)),
+            #[cfg(not(feature = "dnssec"))]
             RecordType::DNSKEY => {
                 return Err(ParseError::from("DNSKEY should be dynamically generated"))
             }
